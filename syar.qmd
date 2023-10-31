@@ -1,0 +1,597 @@
+---
+title: "Grade Prediction Report:  Syar Industries Meter & Regulator Station"
+date: "`r format(Sys.time(), '%B %d, %Y')`" 
+execute:
+  echo: false
+  warning: false
+  message: false
+  dpi: 300
+format: 
+  docx:
+   toc: true
+   number-sections: true
+   fig-align: "center"
+   fig-width: 6.5
+   fig-height: 4.5
+---
+
+```{r include=FALSE}
+#| label: setup
+
+library(tidyverse)
+library(flextable)
+library(english)
+library(here)
+
+theme_set(theme_bw(13))
+
+`%!in%` <- Negate(`%in%`)
+
+## This is the palette PGE wants to use for grade prediction reports
+
+pal <- c("#e6194B","#f58231", "#ffe119", "#3cb44b", "#42d4f4","#4363d8", "#911eb4", "#f032e6" )
+grd_lvl <- c("LTB", "B", "X42", "X46", "X52", "X60", "X65", "X70")
+
+# nojoints <- c("JT-01", "JT-04", "JT-07")
+
+rs <-
+  read_csv(here("data", 'predictions_comp_10_23_2023_1001.csv')) %>%
+  mutate(DT = OD / wall) %>%
+  rename(chemistry = composition_method) %>%
+  filter(chemistry == "Filings") 
+
+numb <- length(unique(rs$joint))
+
+```
+
+# Executive Summary {.unnumbered}
+
+The `r english(numb)` pipe joints from Syar Industries Meter & Regulator Station (Syar Ind Lake Herm Station) had chemical composition testing completed using non-destructive examination (NDE) and the information was supplied to RSI Pipeline Solutions (RSI) to predict the most probable grade.The chemical composition data was used in a machine learning model that was trained on an aggregated composition dataset from various third parties as well as the Pacific Gas and Electric Company (PG&E) to predict grade.
+
+All the information and code that was used to generate this report are backed up in a repository using Git which is an open-source version control system. Any changes are "pushed" to the repository which tracks what changes were made to each file and when. This allows the tracking of changes and if at any time if there is a need to go back to a previous version the whole repository can be reverted to any saved version. This eliminates ad hoc methods such as saving different versions of a file under different file names or folders each time there is a change that the developer/writer wants to save as a version. The name of the repository for this report is documented in the references \[1\].
+
+Several methods of NDE chemical composition testing were used including filings collection followed by laboratory analysis (Filings) and laser-induced breakdown spectroscopy (LIBS) combined with X-ray fluorescence (XRF). For joints that had filings data available, the filings data were used for grade predictions, otherwise the LIBS/XRF data were used.
+
+```{r}
+#| label: tbl-results_sum
+#| tbl-cap: "Grade Prediction Results Summary"
+
+pct_class <- rs %>% 
+  pivot_longer(.pred_B:.pred_X70) %>% 
+ mutate(name = str_remove(name, ".pred_"),
+         name = factor(name, levels = grd_lvl)) %>% 
+  group_by(case_no,chemistry, joint) %>% 
+  filter(rank(value)==8) %>%
+  group_by(chemistry, joint) %>% 
+  count(name) %>% 
+  mutate(pct = n/5000) 
+
+max_class <- pct_class %>% 
+  group_by(joint, chemistry) %>% 
+  summarise(pct = max(pct)) %>% 
+  left_join(pct_class, by=c("joint", "chemistry","pct")) %>% 
+  select(joint, chemistry, name, pct) %>% 
+  ungroup()
+
+meanprob <- rs %>% 
+   # filter(combo=="C1") %>% 
+  pivot_longer(.pred_B:.pred_X70) %>% 
+  mutate(name = str_remove(name, ".pred_"),
+         name = ifelse(name=="Grade B","B", name),
+         name = factor(name, levels = grd_lvl)) %>% 
+  group_by(joint, name, chemistry) %>%
+  summarise(mprob = mean(value)) 
+
+maxprob <- meanprob %>%
+  ungroup() %>%
+  group_by(joint) %>%
+  summarise(prob = max(mprob),
+            maxpct = meanprob$name[which(meanprob$mprob == prob)]) 
+
+grade_pred_sum <- maxprob %>% 
+  left_join(max_class, by = "joint") %>% 
+  select(joint, maxpct, name) %>% 
+  rename('Highest Predicted\nMean Probability' = maxpct, 
+         'Highest Percentage\nof Cases' = name,
+         Joint = joint) %>% 
+  mutate(rw= row_number(Joint))
+
+rwz = grade_pred_sum$rw[grade_pred_sum$rw %% 2 == 1]
+
+grade_pred_sum %>%
+  select(-rw) %>%
+  flextable() %>%
+  bg(bg = 'grey75',
+     # j = 1:3,
+     i = rwz) %>%
+  theme_box() %>%
+  bold(j = "Joint") %>%
+  autofit()
+
+
+```
+
+PG&E will make the final determination of the pipe grade to use in downstream analyses. Any disagreement between the highest predicted mean probability and highest percentage of cases will be resolved during PG&E's grade determination process.
+
+# Introduction
+
+Although yield strength (YS) can be measured through in-situ methods like Instrumented Indentation Testing (IIT) with a reasonable degree of confidence, YS by itself does not address the question of pipe grade (and hence, SMYS) since a single YS can span multiple grades based on the allowable ranges of YS per API 5L. To overcome this challenge, a supervised classification machine learning (ML) model was developed to predict pipe grade using NDE chemical composition measurements as inputs.\[2\] This ML model is referred to in this report as a pipe grade calculator. While using the ML-based model provides substantial improvement in predicting pipe grade, measurement uncertainty from both composition NDE tools must be considered per 192.607(d)(2). This model uses the wt% of manganese, carbon, and sulfur as well as diameter and wall thickness to predict grade using a Random Forest ML model using a dataset of approximately 10,000 joints with known grade and composition. The data sources came from PG&E's ECA and TIMP data as well as third party mill inspection reports. The data was split for training and validation at a 85%/15% ratio respectively. The overall accuracy is 88%. The confusion matrix is shown in @fig-confuse. The total number of cases used to validate the pipe grade calculator are summarized in @tbl-casecount.
+
+The following inputs are used in the ML model.
+
+1.  Carbon content (wt%)
+
+2.  Manganese content (wt%)
+
+3.  Sulfur content (wt%)
+
+4.  Outside diameter (OD)
+
+5.  Nominal wall thickness (NWT)
+
+6.  OD to NWT ratio (OD/NWT)
+
+![Confusion Matrix](C:\\Users\\Joel\\Pictures\\confuse.png){#fig-confuse}
+
+```{r}
+#| label: confuse
+
+confuse <- read_csv("C:\\Users\\Joel\\OneDrive - RSI Pipeline Solutions\\ChemistryGrade\\Grade_Model\\confusion_matrix2.csv", show_col_types = FALSE) %>%
+  rename(grade = Grade)
+ 
+  
+```
+
+## Number of Cases {.unnumbered}
+
+```{r}
+#| label: tbl-casecount
+#| tbl-cap: "Number of Cases in Confusion Matrix Validation Set"
+
+allcon <- confuse %>%
+  pivot_longer(LTB:X70, names_to = "Grade") %>%
+  summarise('Total Number\nof Cases' = sum(value)) %>%
+  mutate(Grade = "Total") %>%
+  relocate(Grade)
+
+con_long <- confuse %>%
+  rename(Grade = grade) %>%
+  mutate('Total Number\nof Cases' = rowSums(.[2:9])) %>%
+  bind_rows(allcon) %>%
+  mutate(rw = 1:n())
+
+conrow <- con_long$rw[con_long$rw %% 2 == 1]
+
+con_long %>%
+  select(-c(rw, LTB:X70)) %>%
+  flextable() %>%
+  bg(bg = 'grey75', i = conrow, j = 1:2) %>%
+  theme_box() %>%
+  bold(j = "Grade") %>% 
+  autofit()
+  
+```
+
+# Model Inputs
+
+A measurement is the process of assigning a value to a physical quantity. Regardless of the precision, measurements will have some variation between the true (but unknown) value and the reported value. To account for this uncertainty of the chemical composition measurements acquired through NDE, a large set of input cases were generated using the uncertainty previously quantified by a third-party vendor and analyzed with the pipe grade calculator using a Monte Carlo analysis.[^1] Specifically, these input cases were generated by treating each measurement quantity as a stochastic variable and randomly sampling each quantity's uncertainty distribution, which was assumed to be a t-distribution with corresponding mean, standard deviation, and number of samples[^2]. The OD, NWT, and OD/NWT were treated as fixed values and stochastic samples (hereto after called cases) were only generated for chemical composition elements. The chemical composition dataset consisted of Mn, C, and S elements. A total of 5,000 input cases were generated for each joint and had corresponding grade probabilities generated. The wall thickness and diameter information is shown in @tbl-data.
+
+[^1]: A Monte Carlo analysis consists of running numerous simulations by repeatedly sampling a model's inputs based on each input variable's probability distribution. In this way, the resulting uncertainty of a deterministic model's output can be explored based on the likely distribution of the model's input.
+
+[^2]: The resulting sampled input variables were constrained to ensure that no spuriously generated values were used. Specifically, the following constraints were utilized when sampling the input quantities: 0.02 $\leq$C $\leq$ 0.4, 0.23 $\leq$ Mn $\leq$ 1.8, 0 $\leq$ S $\leq$ 0.1, and 1 $\leq$ Mn/C $\leq$ 70. Reported values of S less than the NDE instrument's limit of detection (LOD) were sampled assuming a uniform distribution between zero and the LOD.
+
+```{r}
+#| label: tbl-data
+#| tbl-cap: "Joint Characteristics [3]"
+
+rs %>%
+  arrange(joint) %>%
+  select(joint, OD, wall) %>%
+  unique() %>%
+  # mutate(dt = round(OD / wall, 1)) %>%
+  rename(
+    'OD\n(in.)' =  OD,
+    "NWT\n(in.)" = wall,
+    # "OD/NWT" = dt,
+    "Joint" = joint
+  ) %>%
+ flextable() %>% 
+   bg(bg = 'grey75',
+     j = 1:3,
+     i = rwz) %>%
+  theme_box() %>% 
+  bold(j = "Joint") %>% 
+  autofit()
+
+```
+
+The values in @tbl-samples are a summary of the information used to generate the Monte Carlo input cases.
+
+```{r}
+#| label: tbl-samples
+#| tbl-cap: "Joint Material Properties [4]"
+
+
+rsv <-
+  read_csv(here("data", "Syar Ind Lake Herm_reportVals_all_20231012.csv")) %>%
+  rename(chemistry = composition_method) %>%
+  drop_na(chemistry) %>%
+  filter(chemistry=="Filings") %>% 
+  select(joint:stdev)
+
+rvrw <- row_number(rsv)[row_number(rsv) %%2 ==1]
+
+rsv %>%
+  filter(input!="NWT1",input!="OD1") %>% 
+  group_by(joint, input) %>%
+  arrange(joint,input) %>%
+  rename_with(.cols = everything(),.fn = str_to_title) %>% 
+  flextable() %>%
+  # colformat_double(i = 4:5,digits = 3) %>% 
+  merge_v(j = c("Joint", "Chemistry"),target = c("Chemistry", "Joint")) %>%
+  theme_vanilla() %>%
+  autofit() %>%
+  set_caption("Material Properties from Filings") %>%
+  set_header_labels(
+    name = 'Element',
+    mean = "Mean (wt%)",
+    std_dev = "Standard Deviation (wt%)",
+    feature = "Joint",
+    chemistry = "NDE Method"
+  ) %>%
+    theme_box() %>% 
+  # bg(bg = 'grey75',
+  #    i = rvrw,
+  #    j = 1:5) %>%
+  bold(j = "Joint") %>% 
+  autofit() 
+
+
+```
+
+# Model Results
+
+## Mean Probabilities
+
+The machine learning model produces a probability for each grade based on each of the 5,000 cases supplied to it. After running all the cases, the probability for each grade was averaged for each joint. The most probable grade is the one with the highest predicted probability. @fig-meanpreds shows the mean probability for each grade. The 95% confidence intervals of the mean were not shown on the plots due to their small size.[^3]
+
+[^3]: Since the confidence interval shrinks in proportion to the square root of the number samples, the length of the confidence interval for 5,000 samples is imperceptible at this scale.
+
+```{r}
+#| label: fig-meanpreds
+#| fig-cap: "Mean Probabilities"
+#| dpi: 300
+
+
+meanprob %>%
+  ggplot(aes(name, mprob)) +
+  geom_col(aes(fill = name), 
+           position = "dodge",
+           show.legend = FALSE) +
+  # geom_text(aes(label = round(mprob,2)), vjust = -0.5) +
+  facet_wrap(~ joint, 
+             ncol =3) +
+  scale_fill_manual(values = pal) +
+  labs(
+    y = "Mean Probability",
+    x = "Grade"
+  )+
+  scale_y_continuous(limits = c(0,1))+
+  theme(plot.margin = margin(0.7,0.7,0.7,0.7,"cm"),
+        axis.text.x = element_text(size = 8))
+
+```
+
+```{r}
+#| label: minmax
+
+minmax <- rs %>%
+   # filter(combo=="C1") %>% 
+    pivot_longer(.pred_B:.pred_X70) %>% 
+    mutate(name = str_remove(name, ".pred_"),
+         name = factor(name, levels = grd_lvl)) %>% 
+    group_by(joint,chemistry,name) %>%
+    summarise(
+        mean = round(mean(value),3)
+    ) %>% 
+    # filter(name %!in% name_fil) %>% 
+  slice_max(n = 2,order_by = mean)
+
+
+tab1 <- minmax[as.integer(row.names(minmax)) %% 2 == 1, ] %>% 
+  mutate(rank ="First")
+#odd rows with max for each
+
+tab2 <- minmax[as.integer(row.names(minmax)) %% 2 == 0, ] %>% 
+  mutate(rank ="Second") 
+#even rows with 2nd max for each
+
+meanprob <- rs %>%
+   # filter(combo=="C1") %>% 
+  pivot_longer(.pred_LTB:.pred_X70) %>%
+  mutate(name = str_remove(name, ".pred_"),
+         name = factor(
+           name,
+           levels = c("LTB", "Grade B", "X42", "X46", "X52", "X60", "X65", "X70")
+         )) %>%
+  group_by(joint, chemistry, name) %>%
+  summarise(mean = round(mean(value), 3)) %>%
+  ungroup()
+
+higrade <- meanprob %>%
+  group_by(joint) %>%
+  summarise(mx = max(mean),
+            grade = name[mx == mean]) %>%
+  ungroup()
+
+hip <- higrade %>% 
+  group_by(grade) %>% 
+  summarise(minb = min(mx), hib = max(mx))
+
+
+hi_LTB <- meanprob %>% 
+  filter(name=="LTB") %>%
+  group_by(joint) %>% 
+  summarise(prob = max(mean)) %>% 
+  arrange(-prob)
+
+
+hi_two <- bind_rows(tab1, tab2) %>%
+  relocate(name, .after = joint) 
+
+```
+
+Using the composition data, the highest probable grade for all joints as shown in @tbl-predstable. 
+
+```{r}
+#| label: tbl-predstable
+#| tbl-cap: "Mean Probabilities"
+
+not_LTB <- meanprob %>% 
+  filter(name=="LTB") %>% 
+  group_by(joint, chemistry) %>% 
+  summarise(bog = 1-mean) %>% 
+  arrange(bog)
+
+all_pred <- rs %>%
+   # filter(combo=="C1") %>% 
+  pivot_longer(.pred_B:.pred_X70) %>%
+  mutate(name = str_remove(name, ".pred_"),
+         name = ifelse(name=="Grade B","B", name),
+         name = factor(name, levels = grd_lvl)) %>% 
+  group_by(joint, name) %>%
+  summarise(mean = round(mean(value), 3))
+
+all_pred12 <- all_pred %>%
+  left_join(hi_two, by = c("joint", "name")) %>%
+  rename(Mean = mean.x,
+         Grade = name,
+         Joint = joint) %>%
+  select(-mean.y) %>%
+  select(-chemistry) %>%
+  pivot_wider(names_from = Grade,
+              values_from = Mean,
+              id_cols = Joint) %>%
+  ungroup() %>%
+  mutate(mx = pmax(LTB, B, X42, X46, X52, X60, X65, X70))
+
+colmx <-
+  ifelse(all_pred12[2:9] == all_pred12$mx, "lightblue", 'white')
+
+colmx <-
+  ifelse(
+    colmx == 'white' &
+      row(colmx) %% 2 == 1,
+    'grey75',
+    ifelse(colmx == 'lightblue', 'lightblue', 'white')
+  )
+
+rowz <- tibble(rws = 1:nrow(all_pred12), dv = rws %% 2) %>%
+  filter(dv == 1)
+ 
+all_pred12 %>%
+  select(-mx) %>%
+  flextable() %>%
+  bg(i = rowz$rws,
+     j = 1,
+     bg = 'grey75') %>%
+  bg(j = 2:9 ,
+     bg = colmx) %>%
+  merge_v(j = ~ Joint) %>%
+  theme_box() %>%
+  autofit() %>%
+   theme_box() %>%
+   colformat_double(digits = 3) %>% 
+   bold(j = "Joint") %>% 
+  set_caption("Mean Probabilities")
+
+```
+
+## Percentage of Cases
+
+For each case analyzed by the model, a probability is produced for each grade and the one with the highest probability is the chosen grade for that case. @tbl-pctclass and @fig-maxgrade display the percentage of cases that each grade was selected as the most probable.
+
+```{r}
+#| label: maxclass-df
+
+maxB <- max_class %>% 
+  filter(name=="B") %>% 
+  summarise(mxb = max(pct),
+            minb = min(pct))
+
+max42 <- max_class %>% 
+  filter(name=="X42") %>% 
+  summarise(mxb = max(pct),
+            minb = min(pct))
+
+```
+
+```{r}
+#| label: fig-maxgrade
+#| fig-cap: "Percentage of Cases"
+#| dpi: 300
+#| fig-width: 6.5
+
+other <- tibble(
+  joint = first(rs$joint),
+  name = grd_lvl[grd_lvl %!in% pct_class$name],
+  pct = 0
+)
+
+pct_mx <- max_class %>% 
+  rename(mxpct = pct) %>% 
+  select(joint, mxpct) %>% 
+  right_join(pct_class, by = "joint")  %>% 
+  mutate(col = ifelse(pct == mxpct, "lightblue", "white")) %>% 
+  select(joint, name, mxpct, col) 
+
+
+col_pctmx <-
+  expand.grid(joint = unique(pct_class$joint), name = grd_lvl) %>%
+  anti_join(pct_class, by = c('joint', 'name')) %>%
+  mutate(pct = 0) %>%
+  bind_rows(pct_class) %>%
+  arrange(joint, name) %>%
+  full_join(pct_mx, by = c('joint', 'name')) %>%
+  mutate(
+    mxpct = ifelse(is.na(mxpct), 1, mxpct),
+    col = ifelse(pct == mxpct, "lightblue", "white")
+  ) %>%
+  pivot_wider(names_from = name,
+              values_from = col,
+              id_cols = joint) %>%
+  ungroup() %>%
+  mutate(rid = row_number() %% 2,
+         across(.cols = LTB:X70,~ifelse(.=='white' & rid ==1,'grey75',.))) %>% 
+  select(2:9) %>%
+  as.matrix()
+
+pct_class %>%
+  bind_rows(other) %>%
+  mutate(name = factor(name, levels = grd_lvl)) %>%
+  ggplot(aes(name, pct)) +
+  geom_col(aes(fill = name), show.legend = FALSE) +
+  # geom_text(aes(label = round(pct,2)), vjust = -0.5) +
+  facet_wrap( ~ joint, ncol = 3) +
+  theme(
+    panel.spacing.x = unit(0.4, "cm"),
+    plot.margin = margin(
+      t = 0.2,
+      b = 0.2,
+      l = 0.2,
+      r = 0.4,
+      "cm"
+    )
+  ) +
+  labs(y = "Percentage of Cases",
+       x = "Grade") +
+  scale_y_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  scale_fill_manual(values = pal) +
+  theme(axis.text.x = element_text(size = 8))
+
+```
+
+Tabulated Results
+
+```{r}
+#| label: tbl-pctclass
+#| tbl-cap: "Percentage of Cases"
+
+grd_tib <- tibble(name=grd_lvl) %>% 
+  mutate(id = 1:n())
+
+pct_tbl <- pct_class %>%
+  bind_rows(other) %>%
+  ungroup() %>%
+  select(-chemistry) %>%
+  left_join(grd_tib, by = "name") %>%
+  mutate(pct = pct*100,
+         name = str_c(name,"(%)",sep = " ")) %>%
+  arrange(id) %>%
+  select(-id) 
+
+pw <- pct_tbl %>%
+  select(-n) %>%
+  pivot_wider(id_cols = joint,
+              names_from = name,
+              values_from = pct) %>%
+  arrange(joint) %>%
+  rename(Joint = joint) %>%
+  mutate(across(2:9,  ~ ifelse(is.na(.), "0.00", .)),
+         across(2:9,  ~ ifelse(. == 0, "0.00", .)))
+
+flextable(pw) %>% 
+  bg(bg= col_pctmx,j=2:9) %>% 
+   bg(i = rowz$rws,
+     j = 1,
+     bg = 'grey75') %>%
+  theme_box() %>% 
+   bold(j = "Joint") %>% 
+   colformat_double(digits = 2) %>% 
+  autofit()
+
+```
+
+## Boxplots of Probabilities
+
+Boxplots are a visual aid that demonstrates not just the range of values but where the majority of the data is concentrated. Boxplots consist of four parts. The "box" portion is called the inner quartile range (IQR), which starts at the end of the first through the third quartile of the data where the most of the data resides. The line through the middle of the box is the median value. The lines extending out from the box continue to the last data point that is less than or equal to 1.5 times the IQR from the box. Anything that is further than 1.5 times the IQR is considered an outlier and each of the data points that meet that criteria are plotted as a single point. As shown in @fig-boxplots, all of the grade predictions were strongly Grade B or X42. No other grades had significant probabilities relative to those two.
+
+```{r}
+#| label: fig-boxplots
+#| fig-cap: "Boxplot of Probabilities"
+#| dpi: 300
+
+rs %>%
+  pivot_longer(cols = .pred_B:.pred_X70) %>%
+  mutate(name = str_remove(name, ".pred_"),
+         name = factor(name, levels = grd_lvl)) %>%
+  ggplot(aes(name, value)) +
+  geom_boxplot(aes(fill = name),
+               show.legend = FALSE,
+               outlier.shape = 1) +
+  facet_wrap(~ joint, ncol = 3) +
+  scale_y_continuous(breaks = scales::pretty_breaks()) +
+  labs(
+       y = "Probability",
+       x = "Grade") +
+  scale_fill_manual(values = pal) +
+  theme(
+    panel.spacing.x = unit(0.2, "inches"),
+    plot.margin = margin(0.2, 0.6, 0.2, 0.2, "cm")
+  )+
+  theme(axis.text.x = element_text(size = 8))
+
+
+```
+
+# Conclusion
+
+For the `r english(numb)` joints analyzed for Syar Ind Lake Herm Station, the predicted grade for all joints is Grade X42 except for for JT-10 and JT-100 which were Grade B based on mean probability and percentage of cases. There were no differences in predictions between the mean probability and percentage of cases. JT-06, 07, and 10 had significant probabilities of LTB, especially JT-10. Joints JT-06 and JT-07 are consistent with each other in composition while JT-10 is dissimilar, noticeably in C and Mn which were quite low. The composition for JT-06 and JT-07 were consistent with historical trends for X42, it is possible the higher than expected LTB probability was because of the low diameter to wall thickness ratio for JT-06 and JT-07. The higher than expected LTB for JT-10 probably due to the very low C and Mn values as well as the low diameter to wall thickness ratio. 
+
+```{r}
+#| label: tbl-results_con
+#| tbl-cap: "Grade Prediction Results Summary"
+
+grade_pred_sum %>%
+  select(-rw) %>%
+  flextable() %>%
+  bg(bg = 'grey75',
+     j = 1:3,
+     i = rwz) %>%
+  autofit() %>%
+  bold(j = "Joint") %>%
+  theme_box()
+
+```
+
+PG&E will make the final determination of the pipe grade to use in downstream analyses. Any disagreement between the highest predicted mean probability and highest percentage of cases will be resolved during PG&E's grade determination process.
+
+# References
+
+1.  Version Control: syar_ind.git
+
+2.  RSI Pipeline Solutions, "Pipe Grade Calculator Development Report", June 26, 2023
+
+3.  Pacific Gas & Electric Co. (PG&E) Facility Integrity Management Program (FIMP) Risk "Pipe Nominal Wall Thickness Report: Syar Industries Meter & Regulator Station", XXXXXXX XX, 2023
+
+4.  Exponent, Inc., "Syar Industries Meter & Regulator Station Chemical Composition Results and Analysis Exponent Project No. 2303657.000"
